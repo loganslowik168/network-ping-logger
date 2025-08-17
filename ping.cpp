@@ -6,6 +6,8 @@
 #include <chrono>
 #include <ctime>
 #include <iomanip>
+#include <regex>
+#include <optional>
 
 
 const std::string INPUT_FILE = "ip_list.txt";
@@ -13,7 +15,7 @@ const std::string OUTPUT_FILE = "ping_log.txt";
 
 // Function to ping a given IP address
 // Returns true if the IP responded, false otherwise
-bool ping_ip(const std::string& ip) {
+std::optional<double> ping_ip(const std::string& ip) {
     // 1 packet
     // 10 timeout
     std::string command = "ping -c 1 -w 10 " + ip + " 2>&1";
@@ -37,12 +39,19 @@ bool ping_ip(const std::string& ip) {
 
     pclose(pipe);
 
-    // check for success
-    if (result.find("0 received") != std::string::npos ||
-        result.find("100% packet loss") != std::string::npos) {
-        return false; // ping fail
+    std::regex time_regex("time=([0-9.]+)\\s*ms");
+    std::smatch matches;
+
+    if (std::regex_search(result, matches, time_regex)) {
+        try {
+            return std::stod(matches[1].str()); // string to double
+        } catch (const std::exception& e) {
+            std::cerr << "Error parsing RTT for " << ip << ": " << e.what() << std::endl;
+            return std::nullopt;
+        }
     } else {
-        return true; // at least one ping succeeded
+        // failure
+        return std::nullopt;
     }
 }
 
@@ -88,11 +97,15 @@ int main() {
 
     // ping each ip
     for (const std::string& current_ip : ips_to_ping) {
-        bool responded = ping_ip(current_ip);
-
-        output_file << timestamp << " - IP: " << current_ip << " - Status: "
-                    << (responded ? "Responded" : "Not Responded") << std::endl;
-        std::cout << "Logged ping for " << current_ip << ": " << (responded ? "Responded" : "Not Responded") << std::endl;
+        std::optional<double> rtt = ping_ip(current_ip);
+        if (rtt) {
+            output_file << timestamp << " - IP: " << current_ip << " - RTT: "
+                        << std::fixed << std::setprecision(2) << *rtt << " ms" << std::endl;
+            std::cout << "Logged ping for " << current_ip << ": " << *rtt << " ms" << std::endl;
+        } else {
+            output_file << timestamp << " - IP: " << current_ip << " - RTT: Timeout" << std::endl;
+            std::cout << "Logged ping for " << current_ip << ": Timeout" << std::endl;
+        }
     }
     output_file << std::endl;
     output_file.close();

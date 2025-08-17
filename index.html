@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Ping Log Viewer</title>
+    <!-- Tailwind CSS CDN for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Import Inter font from Google Fonts */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        .font-inter {
+          font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="min-h-screen bg-gray-100 flex items-center justify-center p-4 font-inter">
+    <div id="app" class="bg-white p-8 rounded-lg shadow-xl w-full max-w-2xl">
+        <!-- Content will be rendered here by JavaScript -->
+    </div>
+
+    <!-- Include the separate config.js file -->
+    <script src="./config.js"></script>
+
+    <script>
+        const appDiv = document.getElementById('app');
+        let currentLogData = ''; // Variable to store fetched log data
+
+        // --- Core Functions for Parsing and Uptime Calculation (Unchanged) ---
+        function parseLogData(logString) {
+            const lines = logString.split('\n').filter(line => line.trim() !== '');
+            const parsed = [];
+            lines.forEach(line => {
+                const match = line.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - IP: (\S+) - RTT: (.*)$/);
+                if (match) {
+                    const timestamp = new Date(match[1].replace(/-/g, '/'));
+                    const ip = match[2];
+                    const status = match[3];
+                    const isTimeout = (status === 'Timeout');
+                    const rtt = isTimeout ? null : parseFloat(status.replace(' ms', ''));
+                    parsed.push({ timestamp, ip, isTimeout, rtt });
+                }
+            });
+            parsed.sort((a, b) => a.timestamp - b.timestamp);
+            return parsed;
+        }
+
+        function calculateUptimeDetails(parsedLogs) {
+            const ips = [...new Set(parsedLogs.map(log => log.ip))].sort();
+            const uptimeDetails = {};
+
+            ips.forEach(ip => {
+                uptimeDetails[ip] = {
+                    totalUpTimeMs: 0,
+                    totalDurationMs: 0,
+                    lastDowntimeStart: null,
+                    lastDowntimeEnd: null,
+                    lastDowntimeDurationMs: null,
+                    lastPingStatus: null
+                };
+
+                const ipLogs = parsedLogs.filter(log => log.ip === ip);
+                if (ipLogs.length === 0) return;
+
+                let lastKnownStatus = !ipLogs[0].isTimeout;
+                let segmentStart = ipLogs[0].timestamp.getTime();
+
+                if (ipLogs[0].isTimeout) {
+                    uptimeDetails[ip].lastDowntimeStart = ipLogs[0].timestamp;
+                }
+
+                for (let i = 0; i < ipLogs.length; i++) {
+                    const currentLog = ipLogs[i];
+                    const currentStatus = !currentLog.isTimeout;
+                    const currentTime = currentLog.timestamp.getTime();
+
+                    if (i === ipLogs.length - 1) {
+                        uptimeDetails[ip].totalDurationMs = currentTime - ipLogs[0].timestamp.getTime();
+                    }
+
+                    if (currentStatus !== lastKnownStatus) {
+                        const duration = currentTime - segmentStart;
+                        if (lastKnownStatus) {
+                            uptimeDetails[ip].totalUpTimeMs += duration;
+                            uptimeDetails[ip].lastDowntimeStart = currentLog.timestamp;
+                            uptimeDetails[ip].lastDowntimeEnd = null;
+                            uptimeDetails[ip].lastDowntimeDurationMs = null;
+                        } else {
+                            if (uptimeDetails[ip].lastDowntimeStart) {
+                                uptimeDetails[ip].lastDowntimeEnd = currentLog.timestamp;
+                                uptimeDetails[ip].lastDowntimeDurationMs = currentTime - uptimeDetails[ip].lastDowntimeStart.getTime();
+                            }
+                        }
+                        segmentStart = currentTime;
+                        lastKnownStatus = currentStatus;
+                    }
+
+                    if (i === ipLogs.length - 1) {
+                        if (lastKnownStatus) {
+                            uptimeDetails[ip].totalUpTimeMs += (currentTime - segmentStart);
+                        } else {
+                            if (uptimeDetails[ip].lastDowntimeStart && !uptimeDetails[ip].lastDowntimeEnd) {
+                                uptimeDetails[ip].lastDowntimeDurationMs = currentTime - uptimeDetails[ip].lastDowntimeStart.getTime();
+                            }
+                        }
+                        uptimeDetails[ip].lastPingStatus = currentStatus;
+                    }
+                }
+            });
+            return uptimeDetails;
+        }
+
+        function formatDuration(ms) {
+            if (ms === null) return 'N/A';
+            if (ms < 1000) return `${ms.toFixed(0)} ms`;
+            const seconds = ms / 1000;
+            if (seconds < 60) return `${seconds.toFixed(1)} seconds`;
+            const minutes = seconds / 60;
+            if (minutes < 60) return `${minutes.toFixed(1)} minutes`;
+            const hours = minutes / 60;
+            return `${hours.toFixed(1)} hours`;
+        }
+        // --- End Core Functions ---
+
+        // Function to render the login form
+        function renderLoginForm(errorMessage = '') {
+            appDiv.innerHTML = `
+                <h1 class="text-3xl font-semibold text-center text-gray-800 mb-6">Login to View Logs</h1>
+                <form id="loginForm" class="space-y-4">
+                    <div>
+                        <label for="username" class="block text-sm font-medium text-gray-700">Username</label>
+                        <input type="text" id="username" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                    </div>
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-gray-700">Password</label>
+                        <input type="password" id="password" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" required>
+                    </div>
+                    ${errorMessage ? `<p class="text-red-500 text-sm text-center">${errorMessage}</p>` : ''}
+                    <button type="submit" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out">
+                        Login
+                    </button>
+                </form>
+            `;
+
+            document.getElementById('loginForm').addEventListener('submit', handleLogin);
+        }
+
+        // Function to render the log data and uptime details (now uses currentLogData)
+        function renderLogViewer() {
+            if (!currentLogData) {
+                appDiv.innerHTML = `<p class="text-center text-gray-700">Loading log data...</p>`;
+                return;
+            }
+
+            const parsedLogs = parseLogData(currentLogData);
+            const uptimeStats = calculateUptimeDetails(parsedLogs);
+            const logDurationMs = parsedLogs.length > 1 ? parsedLogs[parsedLogs.length - 1].timestamp.getTime() - parsedLogs[0].timestamp.getTime() : 0;
+            const logDurationFormatted = formatDuration(logDurationMs);
+
+            let uptimeDetailsHtml = '<h2 class="text-xl font-semibold text-gray-700 mb-2 mt-6">Uptime & Downtime Summary</h2>';
+            uptimeDetailsHtml += `<p class="text-sm text-gray-600 mb-4">Calculated over a period of: ${logDurationFormatted}</p>`;
+            uptimeDetailsHtml += '<div class="space-y-4">';
+
+            Object.keys(uptimeStats).forEach(ip => {
+                const stats = uptimeStats[ip];
+                const lastDowntimeMsg = stats.lastDowntimeStart
+                    ? `Last down: ${stats.lastDowntimeStart.toLocaleString()} for ${formatDuration(stats.lastDowntimeDurationMs || (stats.lastPingStatus === false ? (Date.now() - stats.lastDowntimeStart.getTime()) : 0))}${stats.lastPingStatus === false && !stats.lastDowntimeEnd ? ' (ongoing)' : ''}`
+                    : 'No recent downtime recorded.';
+
+                let uptimePercentage = 0;
+                if (stats.totalDurationMs > 0) {
+                     uptimePercentage = ((stats.totalUpTimeMs / stats.totalDurationMs) * 100).toFixed(2);
+                } else if (parsedLogs.filter(log => log.ip === ip).length > 0 && !parsedLogs.filter(log => log.ip === ip)[0].isTimeout) {
+                    uptimePercentage = 100;
+                }
+
+                uptimeDetailsHtml += `
+                    <div class="p-3 bg-gray-100 rounded-md border border-gray-200">
+                        <h3 class="font-bold text-gray-800">${ip}</h3>
+                        <p class="text-sm text-gray-700"><strong>Uptime:</strong> ${uptimePercentage}%</p>
+                        <p class="text-sm text-gray-700"><strong>${lastDowntimeMsg}</strong></p>
+                    </div>
+                `;
+            });
+            uptimeDetailsHtml += '</div>';
+
+            appDiv.innerHTML = `
+                <h1 class="text-3xl font-semibold text-center text-gray-800 mb-6">Ping Log Viewer</h1>
+
+                ${uptimeDetailsHtml}
+
+                <h2 class="text-xl font-semibold text-gray-700 mb-4 mt-6">Raw Log Data</h2>
+                <div class="bg-gray-50 p-4 rounded-md border border-gray-200 mb-4 h-96 overflow-auto">
+                    <pre class="text-sm text-gray-700 whitespace-pre-wrap">${currentLogData}</pre>
+                </div>
+                <button id="logoutButton" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-blue-700 bg-blue-100 hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out">
+                    Logout
+                </button>
+            `;
+
+            document.getElementById('logoutButton').addEventListener('click', handleLogout);
+        }
+
+        // Function to fetch log data from the backend
+        async function fetchLogData(username, password) {
+            // Base64 encode credentials for Basic Auth
+            const credentials = btoa(`${username}:${password}`);
+            try {
+                // Ensure this URL matches your Flask backend's address and port
+                const response = await fetch('http://192.168.1.134:5138/get_log_data', {
+                    headers: {
+                        'Authorization': `Basic ${credentials}`
+                    }
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Failed to fetch log data');
+                }
+
+                const data = await response.json();
+                currentLogData = data.log_data; // Store fetched data
+                renderLogViewer(); // Render after data is fetched
+                return true;
+            } catch (error) {
+                console.error('Error fetching log data:', error);
+                renderLoginForm(error.message || 'Error fetching data. Check server status.');
+                return false;
+            }
+        }
+
+        // Handle login form submission
+        async function handleLogin(event) {
+            event.preventDefault();
+
+            const usernameInput = document.getElementById('username').value;
+            const passwordInput = document.getElementById('password').value;
+
+            // Retrieve credentials from global variables defined in config.js
+            // In a real scenario, these would be sent to a backend for verification.
+            const validUsername = typeof VALID_USERNAME !== 'undefined' ? VALID_USERNAME : 'default_user';
+            const validPassword = typeof VALID_PASSWORD !== 'undefined' ? VALID_PASSWORD : 'default_pass';
+
+            if (usernameInput === validUsername && passwordInput === validPassword) {
+                // Attempt to fetch data using the provided (or default) credentials
+                const success = await fetchLogData(usernameInput, passwordInput);
+                if (success) {
+                    sessionStorage.setItem('isLoggedIn', 'true');
+                    sessionStorage.setItem('username', usernameInput); // Store for potential re-fetch
+                    sessionStorage.setItem('password', passwordInput); // Store for potential re-fetch (NOT secure for real apps!)
+                }
+            } else {
+                renderLoginForm('Invalid username or password.');
+            }
+        }
+
+        // Handle logout
+        function handleLogout() {
+            sessionStorage.removeItem('isLoggedIn');
+            sessionStorage.removeItem('username');
+            sessionStorage.removeItem('password');
+            currentLogData = ''; // Clear log data on logout
+            renderLoginForm();
+        }
+
+        // Initial render based on login status in session storage
+        window.onload = async function() {
+            appDiv.classList.remove('max-w-md');
+            appDiv.classList.add('max-w-3xl');
+
+            if (sessionStorage.getItem('isLoggedIn') === 'true') {
+                const username = sessionStorage.getItem('username');
+                const password = sessionStorage.getItem('password');
+                // Re-fetch data using stored credentials
+                const success = await fetchLogData(username, password);
+                if (!success) {
+                    // If re-fetch fails, force logout
+                    handleLogout();
+                }
+            } else {
+                renderLoginForm();
+            }
+        };
+    </script>
+</body>
+</html>
